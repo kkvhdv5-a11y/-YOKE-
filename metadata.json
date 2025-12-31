@@ -1,0 +1,7 @@
+{
+  "name": "YOKE - Neural Synthesis Assistant",
+  "description": "A high-performance AI orchestrator integrating multi-model analysis, deep linguistic remodeling, and emotive neural text-to-speech.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
