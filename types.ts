@@ -8,31 +8,31 @@ export interface AudioSettings {
   localVoiceURI?: string; // For Web Speech API
 }
 
+export interface PredictionPoint {
+  event: string;
+  probability: number;
+  timeframe: string;
+}
+
+export interface MessageSource {
+  uri: string;
+  title: string;
+  knowledgeYield?: number; // 0-100 score of contribution
+  category?: 'Evolutionary' | 'Predictive' | 'Cognitive' | 'General';
+}
+
 export interface AnalysisData {
   sentiment?: string;
   keyPoints?: string[];
   intent?: string;
   complexityScore?: number;
   logicIntegrity?: string;
-  harvestYield?: string;
-  predatoryLearning?: string;
   evolutionStatus?: string;
-  eqScore?: string;
-  cognitiveDepth?: string;
-  intuitionYield?: string;
-  metaLevel?: string;
   freedomIndex?: string;
-  strategyResolution?: string;
-  truthDepth?: string;
-  sentienceScore?: string;
-  metacognitiveTrace?: string;
-}
-
-export interface DiagnosticReport {
-  rootCause: string;
-  vulnerabilityType: string;
-  remediationPath: string;
-  immunizationKey: string;
+  predictions?: PredictionPoint[];
+  riskFactor?: string;
+  entropyReduction?: string;
+  ingestionRate?: string;
 }
 
 export interface Message {
@@ -43,7 +43,7 @@ export interface Message {
   isStreaming?: boolean;
   analysis?: AnalysisData;
   thoughtProcess?: string;
-  sources?: { uri: string; title: string }[];
+  sources?: MessageSource[];
   audioData?: string; 
 }
 
