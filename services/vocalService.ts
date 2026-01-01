@@ -9,14 +9,23 @@ export interface VocalResponse {
   nodeName: string;
 }
 
-const NODES = {
-  PRIMARY: '神经主节点 (Gemini 2.5)',
-  BACKUP: '本地镜像节点 (OS Engine)'
+// Simple in-memory cache for audio buffers to prevent redundant API calls
+const audioCache = new Map<string, AudioBuffer>();
+
+// Generate a cache key based on text and voice settings
+const getCacheKey = (text: string, voice: string): string => `${voice}:${text.trim()}`;
+
+// 彻底清除 Markdown 符号
+const cleanTextForSpeech = (text: string): string => {
+  return text
+    .replace(/\[.*?\]/g, '') // 移除 [标签]
+    .replace(/[#*`_~>]/g, '') // 移除 #, *, `, _, ~, >
+    .replace(/\n+/g, ' ') // 换行转空格
+    .trim();
 };
 
-// 语义化精准切分：避免在词语中间断开
 const splitTextIntoChunks = (text: string, maxLength: number): string[] => {
-  const cleanText = text.replace(/\[.*?\]/g, '').replace(/[\r\n]/g, ' ').trim();
+  const cleanText = cleanTextForSpeech(text);
   const segments = cleanText.split(/([。！？；.!?;\n])/g);
   let chunks: string[] = [];
   let currentChunk = "";
@@ -43,46 +52,53 @@ export const orchestrateVocalSynthesis = async (
 ): Promise<VocalResponse | null> => {
   
   try {
-    if (onNodeSwitch) onNodeSwitch(NODES.PRIMARY);
-    
     const signalMatch = text.match(/\[神经重构信号\]:?([\s\S]*?)$/i);
-    const rawContent = signalMatch ? signalMatch[1].trim() : text.replace(/\[.*?\]/g, '').trim();
+    const rawContent = signalMatch ? signalMatch[1].trim() : text;
     
-    // 调小单次生成块大小（350字），降低 Resource Exhausted 触发概率
-    const textChunks = splitTextIntoChunks(rawContent, 350);
+    // Split text into manageable chunks for TTS API
+    const textChunks = splitTextIntoChunks(rawContent, 400);
     const audioBuffers: AudioBuffer[] = [];
 
+    if (onNodeSwitch) onNodeSwitch('云端神经节点 (Gemini-TTS)');
+
     for (let i = 0; i < textChunks.length; i++) {
+      const chunkText = textChunks[i];
+      const cacheKey = getCacheKey(chunkText, settings.voiceName);
+
+      // 1. Check Cache First
+      if (audioCache.has(cacheKey)) {
+        audioBuffers.push(audioCache.get(cacheKey)!);
+        onProgress(Math.round(((i + 1) / textChunks.length) * 100));
+        continue;
+      }
+
+      // 2. Call Cloud API with Retry/Fallback logic
       try {
-        const data = await generateEmotiveSpeech(textChunks[i], settings.voiceName || 'Charon');
+        const data = await generateEmotiveSpeech(chunkText, settings.voiceName);
         if (data) {
           const buffer = await decodeAudioData(decodeBase64(data), audioCtx);
+          // Store in cache
+          audioCache.set(cacheKey, buffer);
           audioBuffers.push(buffer);
         }
       } catch (innerError: any) {
-        // 如果触发 Quota 限制 (429)，立即跳出循环，交由本地引擎保底
-        if (innerError.message?.includes('429') || innerError.message?.includes('Resource exhausted')) {
-          console.warn("[熔断系统] 云端 TTS 资源耗尽，正在紧急切换至本地引擎...");
-          throw new Error('QUOTA_EXHAUSTED');
+        const errorMsg = innerError.message?.toLowerCase() || "";
+        // 429 RESOURCE_EXHAUSTED or Quota detection
+        if (errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('exhausted') || errorMsg.includes('limit')) {
+          console.warn("[熔断机制] 云端配额耗尽，切换至物理本地合成。");
+          throw new Error('QUOTA_LIMIT');
         }
         throw innerError;
       }
       onProgress(Math.round(((i + 1) / textChunks.length) * 100));
     }
 
-    if (audioBuffers.length === 0) throw new Error("Audio synthesis returned empty");
-
-    return { audioChunks: audioBuffers, nodeName: NODES.PRIMARY };
+    return { audioChunks: audioBuffers, nodeName: '云端神经节点 (Gemini-TTS)' };
   } catch (e: any) {
-    console.warn("TTS主节点故障/熔断:", e.message);
+    if (onNodeSwitch) onNodeSwitch('物理本地引擎 (Fallback)');
+    return { isLocal: true, nodeName: '物理本地引擎 (Fallback)' };
   }
-
-  // 本地冗余节点
-  if (onNodeSwitch) onNodeSwitch(NODES.BACKUP);
-  return { isLocal: true, nodeName: NODES.BACKUP };
 };
-
-const UTTERANCE_POOL = new Set<SpeechSynthesisUtterance>();
 
 export const speakLocally = (text: string, settings: AudioSettings, onEnd: () => void) => {
   if (!('speechSynthesis' in window)) {
@@ -91,57 +107,39 @@ export const speakLocally = (text: string, settings: AudioSettings, onEnd: () =>
   }
   
   window.speechSynthesis.cancel(); 
-  UTTERANCE_POOL.clear();
-
-  const signalMatch = text.match(/\[神经重构信号\]:?([\s\S]*?)$/i);
-  const rawContent = signalMatch ? signalMatch[1].trim() : text.replace(/\[.*?\]/g, '').trim();
-  const chunks = splitTextIntoChunks(rawContent, 80); // 本地引擎分段更细，防止长句崩溃
+  const cleanContent = cleanTextForSpeech(text);
+  const chunks = splitTextIntoChunks(cleanContent, 100);
 
   let currentChunkIndex = 0;
-
   const playNextChunk = () => {
     if (currentChunkIndex >= chunks.length) {
-      UTTERANCE_POOL.clear();
       onEnd();
       return;
     }
 
     const utterance = new SpeechSynthesisUtterance(chunks[currentChunkIndex]);
-    UTTERANCE_POOL.add(utterance);
-
     const voices = window.speechSynthesis.getVoices();
-    const selectedVoice = voices.find(v => v.lang.includes('zh') && (v.name.includes('Xiaoxiao') || v.name.includes('Google'))) || 
+    
+    // Priority: Chinese Professional Voices -> Local OS Voices
+    const selectedVoice = voices.find(v => v.lang.includes('zh') && (v.name.includes('Xiaoxiao') || v.name.includes('Mainland'))) || 
                           voices.find(v => v.lang.includes('zh')) ||
                           voices[0];
                           
     if (selectedVoice) utterance.voice = selectedVoice;
-    utterance.pitch = settings.pitch || 1.0; 
-    utterance.rate = settings.rate || 1.1;
+    utterance.pitch = settings.pitch; 
+    utterance.rate = settings.rate;
 
     utterance.onend = () => {
-      UTTERANCE_POOL.delete(utterance);
       currentChunkIndex++;
       playNextChunk();
     };
-
-    utterance.onerror = (e) => {
-      console.error("Local TTS Error:", e);
-      UTTERANCE_POOL.delete(utterance);
+    
+    utterance.onerror = () => {
       currentChunkIndex++;
       playNextChunk();
     };
 
     window.speechSynthesis.speak(utterance);
-    
-    // Chrome 定时器保活：解决超过15秒自动切断的问题
-    const keepAlive = setInterval(() => {
-      if (!window.speechSynthesis.speaking) {
-        clearInterval(keepAlive);
-      } else {
-        window.speechSynthesis.pause();
-        window.speechSynthesis.resume();
-      }
-    }, 5000);
   };
 
   playNextChunk();
